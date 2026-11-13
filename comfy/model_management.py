@@ -1344,6 +1344,10 @@ def supports_dtype(device, dtype): #TODO
     return False
 
 def supports_cast(device, dtype): #TODO
+    if is_device_type(device, "tpu") or (device is None and is_tpu()):
+        if dtype in (torch.bfloat16, torch.float32, torch.int64, torch.int32, torch.int8, torch.bool):
+            return True
+        return False
     if dtype == torch.float32:
         return True
     if dtype == torch.float16:
@@ -1374,6 +1378,8 @@ def device_supports_non_blocking(device):
         return True
     if is_device_mps(device):
         return False #pytorch bug? mps doesn't support non blocking
+    if is_device_type(device, "tpu") or (device is None and is_tpu()):
+        return False
     if is_intel_xpu(): #xpu does support non blocking but it is slower on iGPUs for some reason so disable by default until situation changes
         return False
     if args.deterministic: #TODO: figure out why deterministic breaks non blocking from gpu to cpu (previews)
