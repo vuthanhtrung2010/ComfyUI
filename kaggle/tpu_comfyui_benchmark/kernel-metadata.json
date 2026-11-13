@@ -1,0 +1,11 @@
+{
+  "id": "devtrung/comfyui-tpu-8core-benchmark",
+  "title": "ComfyUI TPU 8-Core Benchmark",
+  "code_file": "comfyui_tpu_benchmark.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_tpu": "true",
+  "enable_internet": "true"
+}
