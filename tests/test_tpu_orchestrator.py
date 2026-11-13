@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import os
 import sys
+import json
 
 # Ensure repo root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -55,6 +56,41 @@ class TestTPUClusterManager(unittest.TestCase):
             self.assertEqual(result["total_prompts"], 2)
             self.assertEqual(result["successful_prompts"], 2)
             self.assertEqual(len(result["results"]), 2)
+
+    def test_dispatch_prompt_error_capture(self):
+        manager = TPUClusterManager(cores=1, base_port=8188)
+        prompt_resp = json.dumps({"prompt_id": "err-prompt-123"}).encode("utf-8")
+        history_resp = json.dumps({
+            "err-prompt-123": {
+                "outputs": {},
+                "status": {
+                    "status_str": "error",
+                    "completed": False,
+                    "messages": [
+                        ["execution_error", {
+                            "node_id": "1",
+                            "node_type": "UnetLoaderGGUF",
+                            "exception_type": "ValueError",
+                            "exception_message": "Unsupported model"
+                        }]
+                    ]
+                }
+            }
+        }).encode("utf-8")
+
+        mock_prompt_conn = MagicMock()
+        mock_prompt_conn.read.return_value = prompt_resp
+        mock_prompt_conn.__enter__.return_value = mock_prompt_conn
+
+        mock_hist_conn = MagicMock()
+        mock_hist_conn.read.return_value = history_resp
+        mock_hist_conn.__enter__.return_value = mock_hist_conn
+
+        with patch("urllib.request.urlopen", side_effect=[mock_prompt_conn, mock_hist_conn]):
+            res = manager.dispatch_prompt(8188, {"1": {}}, timeout=5.0)
+            self.assertEqual(res["status"], "error")
+            self.assertIn("UnetLoaderGGUF", res.get("error", ""))
+            self.assertIn("Unsupported model", res.get("error", ""))
 
 if __name__ == "__main__":
     unittest.main()

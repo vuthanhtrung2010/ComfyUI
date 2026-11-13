@@ -151,6 +151,10 @@ try:
         tpu_available = (getattr(acc, "type", None) == "tpu")
     elif hasattr(torch, "tpu") and hasattr(torch.tpu, "is_available"):
         tpu_available = torch.tpu.is_available()
+    else:
+        if "TPU_VISIBLE_DEVICES" in os.environ or getattr(args, "tpu_device", None) is not None:
+            _ = torch.device("tpu")
+            tpu_available = True
 except Exception:
     tpu_available = False
 

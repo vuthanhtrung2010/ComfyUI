@@ -205,29 +205,54 @@ class TPUClusterManager:
         # Poll history
         history_url = f"http://{self.host}:{port}/history/{prompt_id}"
         images: List[str] = []
+        error_msg: Optional[str] = None
+        status = "timeout"
+
         while (time.time() - start_time) < timeout:
             try:
                 with urllib.request.urlopen(history_url, timeout=5.0) as resp:
                     history = json.loads(resp.read().decode("utf-8"))
                     if prompt_id in history:
-                        outputs = history[prompt_id].get("outputs", {})
+                        entry = history[prompt_id]
+                        status_info = entry.get("status", {})
+                        status_str = status_info.get("status_str", "")
+
+                        if status_str == "error":
+                            messages = status_info.get("messages", [])
+                            err_parts = []
+                            for msg in messages:
+                                if isinstance(msg, list) and len(msg) > 1 and msg[0] == "execution_error":
+                                    details = msg[1]
+                                    err_parts.append(f"{details.get('node_type')}(id={details.get('node_id')}): {details.get('exception_type')}: {details.get('exception_message')}")
+                            error_msg = "; ".join(err_parts) if err_parts else f"Error: {messages}"
+                            status = "error"
+                            logging.error("Prompt %s on port %d failed: %s", prompt_id, port, error_msg)
+                            break
+
+                        outputs = entry.get("outputs", {})
                         for node_id, node_output in outputs.items():
                             if "images" in node_output:
                                 for img in node_output["images"]:
                                     images.append(img.get("filename", ""))
-                        break
+
+                        if images or status_info.get("completed", False):
+                            status = "success" if images else "completed_no_images"
+                            break
             except Exception:
                 pass
             time.sleep(1.0)
 
         duration = time.time() - start_time
-        return {
+        res: Dict[str, Any] = {
             "port": port,
             "prompt_id": prompt_id,
             "images": images,
             "duration_seconds": round(duration, 3),
-            "status": "success" if images else "timeout",
+            "status": status,
         }
+        if error_msg:
+            res["error"] = error_msg
+        return res
 
     def dispatch_parallel(self, prompts: List[Dict[str, Any]], timeout: float = 600.0) -> Dict[str, Any]:
         """Concurrently dispatch a list of prompts across all cluster instances."""
