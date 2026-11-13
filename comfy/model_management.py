@@ -139,6 +139,21 @@ try:
 except:
     ixuca_available = False
 
+try:
+    import torch_tpu  # noqa: F401
+except ImportError:
+    pass
+
+tpu_available = False
+try:
+    if hasattr(torch, "accelerator") and torch.accelerator.is_available():
+        acc = torch.accelerator.current_accelerator()
+        tpu_available = (getattr(acc, "type", None) == "tpu")
+    elif hasattr(torch, "tpu") and hasattr(torch.tpu, "is_available"):
+        tpu_available = torch.tpu.is_available()
+except Exception:
+    tpu_available = False
+
 if args.cpu:
     cpu_state = CPUState.CPU
 
@@ -168,6 +183,14 @@ def is_ixuca():
         return True
     return False
 
+def is_tpu():
+    global cpu_state
+    global tpu_available
+    if cpu_state == CPUState.GPU:
+        if tpu_available:
+            return True
+    return False
+
 def is_wsl():
     version = platform.uname().release
     if version.endswith("-Microsoft"):
@@ -189,8 +212,12 @@ def get_torch_device():
             return torch.device("npu", torch.npu.current_device())
         elif is_mlu():
             return torch.device("mlu", torch.mlu.current_device())
-        else:
+        elif is_tpu():
+            return torch.device("tpu")
+        elif torch.cuda.is_available():
             return torch.device(torch.cuda.current_device())
+        else:
+            return torch.device("cpu")
 
 def get_all_torch_devices(exclude_current=False):
     global cpu_state
@@ -211,6 +238,8 @@ def get_all_torch_devices(exclude_current=False):
         elif is_mlu():
             for i in range(torch.mlu.device_count()):
                 devices.append(torch.device("mlu", i))
+        elif is_tpu():
+            devices.append(torch.device("tpu"))
         else:
             # Fallback for unhandled GPU backends: at least
             # report the current device so callers like unload_all_models()
@@ -585,6 +614,8 @@ def get_torch_device_name(device):
             return "{} {} : {}".format(device, torch.cuda.get_device_name(device), allocator_backend)
         elif device.type == "xpu":
             return "{} {}".format(device, torch.xpu.get_device_name(device))
+        elif device.type == "tpu":
+            return "Google Cloud TPU"
         else:
             return "{}".format(device.type)
     elif is_intel_xpu():
@@ -593,8 +624,12 @@ def get_torch_device_name(device):
         return "{} {}".format(device, torch.npu.get_device_name(device))
     elif is_mlu():
         return "{} {}".format(device, torch.mlu.get_device_name(device))
-    else:
+    elif is_tpu():
+        return "Google Cloud TPU"
+    elif torch.cuda.is_available():
         return "CUDA {}: {}".format(device, torch.cuda.get_device_name(device))
+    else:
+        return "CPU"
 
 try:
     logging.info("Device: {}".format(get_torch_device_name(get_torch_device())))
