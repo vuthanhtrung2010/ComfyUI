@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-KERNEL_SLUG="devtrung/comfyui-tpu-8core-benchmark"
+KERNEL_SLUG="devtrung/comfyui-tpu-8-core-benchmark"
 KERNEL_DIR="kaggle/tpu_comfyui_benchmark"
 OUTPUT_DIR="out/kaggle_tpu"
 

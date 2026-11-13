@@ -1,5 +1,5 @@
 {
-  "id": "devtrung/comfyui-tpu-8core-benchmark",
+  "id": "devtrung/comfyui-tpu-8-core-benchmark",
   "title": "ComfyUI TPU 8-Core Benchmark",
   "code_file": "comfyui_tpu_benchmark.ipynb",
   "language": "python",
