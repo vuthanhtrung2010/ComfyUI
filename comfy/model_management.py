@@ -1246,10 +1246,12 @@ def text_encoder_offload_device():
 def text_encoder_device():
     if args.gpu_only:
         return get_torch_device()
+    if is_tpu():
+        return get_torch_device()
     if comfy.memory_management.aimdo_enabled:
         return get_torch_device()
     elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM):
-        if should_use_fp16(prioritize_performance=False):
+        if should_use_fp16(prioritize_performance=False) or should_use_bf16(prioritize_performance=False):
             return get_torch_device()
         else:
             return torch.device("cpu")
@@ -2024,8 +2026,14 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
     if is_ixuca():
         return True
 
+    if is_tpu() or (device is not None and getattr(device, "type", None) == "tpu"):
+        return False
+
     if torch.version.hip:
         return True
+
+    if not torch.cuda.is_available():
+        return False
 
     props = torch.cuda.get_device_properties(device)
     if props.major >= 8:
