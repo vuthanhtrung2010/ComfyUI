@@ -329,6 +329,17 @@ def get_total_memory(dev=None, torch_total_too=False):
     if hasattr(dev, 'type') and (dev.type == 'cpu' or dev.type == 'mps'):
         mem_total = comfy.system_memory.virtual_memory_total()
         mem_total_torch = mem_total
+    elif (hasattr(dev, 'type') and dev.type == 'tpu') or is_tpu():
+        try:
+            mem_free, mem_total = torch.accelerator.get_memory_info(dev)
+            mem_total_torch = torch.accelerator.memory_reserved(dev)
+        except Exception:
+            try:
+                mem_free, mem_total = torch.tpu.get_memory_info(dev)
+                mem_total_torch = torch.tpu.memory_reserved(dev)
+            except Exception:
+                mem_total = 16 * 1024 * 1024 * 1024
+                mem_total_torch = mem_total
     else:
         if is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
@@ -348,12 +359,15 @@ def get_total_memory(dev=None, torch_total_too=False):
             _, mem_total_mlu = torch.mlu.mem_get_info(dev)
             mem_total_torch = mem_reserved
             mem_total = mem_total_mlu
-        else:
+        elif torch.cuda.is_available():
             stats = torch.cuda.memory_stats(dev)
             mem_reserved = stats['reserved_bytes.all.current']
             _, mem_total_cuda = torch.cuda.mem_get_info(dev)
             mem_total_torch = mem_reserved
             mem_total = mem_total_cuda
+        else:
+            mem_total = comfy.system_memory.virtual_memory_total()
+            mem_total_torch = mem_total
 
     if torch_total_too:
         return (mem_total, mem_total_torch)
@@ -474,7 +488,7 @@ try:
         if torch_version_numeric[0] >= 2:
             if ENABLE_PYTORCH_ATTENTION == False and args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
                 ENABLE_PYTORCH_ATTENTION = True
-    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca():
+    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca() or is_tpu():
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             ENABLE_PYTORCH_ATTENTION = True
 except:
@@ -1880,6 +1894,23 @@ def get_free_memory(dev=None, torch_free_too=False):
     if hasattr(dev, 'type') and (dev.type == 'cpu' or dev.type == 'mps'):
         mem_free_total = comfy.system_memory.virtual_memory_available()
         mem_free_torch = mem_free_total
+    elif (hasattr(dev, 'type') and dev.type == 'tpu') or is_tpu():
+        try:
+            mem_free, _ = torch.accelerator.get_memory_info(dev)
+            mem_active = torch.accelerator.memory_allocated(dev)
+            mem_reserved = torch.accelerator.memory_reserved(dev)
+            mem_free_torch = mem_reserved - mem_active
+            mem_free_total = mem_free + mem_free_torch
+        except Exception:
+            try:
+                mem_free, _ = torch.tpu.get_memory_info(dev)
+                mem_active = torch.tpu.memory_allocated(dev)
+                mem_reserved = torch.tpu.memory_reserved(dev)
+                mem_free_torch = mem_reserved - mem_active
+                mem_free_total = mem_free + mem_free_torch
+            except Exception:
+                mem_free_total = 14 * 1024 * 1024 * 1024
+                mem_free_torch = mem_free_total
     else:
         if is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
@@ -1902,13 +1933,16 @@ def get_free_memory(dev=None, torch_free_too=False):
             mem_free_mlu, _ = torch.mlu.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_mlu + mem_free_torch
-        else:
+        elif torch.cuda.is_available():
             stats = torch.cuda.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
             mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_cuda + mem_free_torch
+        else:
+            mem_free_total = comfy.system_memory.virtual_memory_available()
+            mem_free_torch = mem_free_total
 
     if torch_free_too:
         return (mem_free_total, mem_free_torch)
@@ -2038,6 +2072,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         return True
 
     if is_ixuca():
+        return True
+
+    if is_tpu() or (device is not None and getattr(device, "type", None) == "tpu"):
         return True
 
     if is_amd():
@@ -2172,13 +2209,21 @@ def lora_compute_dtype(device):
     LORA_COMPUTE_DTYPES[device] = dtype
     return dtype
 
-def synchronize():
+def synchronize(device=None):
     if cpu_mode():
         return
     if is_intel_xpu():
         torch.xpu.synchronize()
     elif is_ascend_npu():
         torch.npu.synchronize()
+    elif is_tpu() or (device is not None and getattr(device, "type", None) == "tpu"):
+        try:
+            if hasattr(torch, "accelerator"):
+                torch.accelerator.synchronize()
+            elif hasattr(torch, "tpu"):
+                torch.tpu.synchronize()
+        except Exception:
+            pass
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 
@@ -2195,6 +2240,14 @@ def soft_empty_cache(force=False):
         torch.npu.empty_cache()
     elif is_mlu():
         torch.mlu.empty_cache()
+    elif is_tpu():
+        try:
+            if hasattr(torch, "accelerator"):
+                torch.accelerator.empty_cache()
+            elif hasattr(torch, "tpu"):
+                torch.tpu.empty_cache()
+        except Exception:
+            pass
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
