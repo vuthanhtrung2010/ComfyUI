@@ -141,6 +141,21 @@ except:
 
 try:
     import torch_tpu  # noqa: F401
+    try:
+        import torch.utils.backend_registration
+        torch.utils.backend_registration.rename_privateuse1_backend("tpu")
+        torch.utils.backend_registration.generate_methods_for_privateuse1_backend()
+    except Exception:
+        try:
+            torch.utils.rename_privateuse1_backend("tpu")
+            torch.utils.generate_methods_for_privateuse1_backend()
+        except Exception:
+            pass
+    try:
+        if not hasattr(torch, "tpu") and hasattr(torch, "_register_device_module"):
+            torch._register_device_module("tpu", torch_tpu)
+    except Exception:
+        pass
 except ImportError:
     pass
 
@@ -148,7 +163,7 @@ tpu_available = False
 try:
     if hasattr(torch, "accelerator") and torch.accelerator.is_available():
         acc = torch.accelerator.current_accelerator()
-        tpu_available = (getattr(acc, "type", None) == "tpu")
+        tpu_available = (getattr(acc, "type", None) == "tpu" or str(acc) == "tpu")
     elif hasattr(torch, "tpu") and hasattr(torch.tpu, "is_available"):
         tpu_available = torch.tpu.is_available()
     else:
@@ -449,7 +464,9 @@ else:
 def is_nvidia():
     global cpu_state
     if cpu_state == CPUState.GPU:
-        if torch.version.cuda:
+        if is_tpu():
+            return False
+        if torch.version.cuda and torch.cuda.is_available():
             return True
     return False
 
@@ -1990,12 +2007,23 @@ def is_device_cuda(device):
 def is_device_npu(device):
     return is_device_type(device, 'npu')
 
+def is_device_tpu(device):
+    return is_device_type(device, 'tpu')
+
 def set_torch_device(device):
-    """Set the current device for the given torch device. Supports CUDA and XPU."""
+    """Set the current device for the given torch device. Supports CUDA, XPU, and TPU."""
     if is_device_cuda(device):
         torch.cuda.set_device(device)
     elif is_device_xpu(device):
         torch.xpu.set_device(device)
+    elif is_device_tpu(device):
+        try:
+            if hasattr(torch, "accelerator"):
+                torch.accelerator.set_device_index(device)
+            elif hasattr(torch, "tpu") and hasattr(torch.tpu, "set_device"):
+                torch.tpu.set_device(device)
+        except Exception:
+            pass
 
 def should_use_fp16(device=None, model_params=0, prioritize_performance=True, manual_cast=False):
     if device is not None:
@@ -2101,6 +2129,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
             if manual_cast:
                 return True
             return False
+
+    if not torch.cuda.is_available():
+        return False
 
     props = torch.cuda.get_device_properties(device)
 
