@@ -191,9 +191,13 @@ class TPUClusterManager:
         prompt_url = f"http://{self.host}:{port}/prompt"
 
         req = urllib.request.Request(prompt_url, data=prompt_payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            prompt_id = data.get("prompt_id")
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                prompt_id = data.get("prompt_id")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8")
+            raise RuntimeError(f"HTTP Error {e.code} on port {port}: {err_body}")
 
         if not prompt_id:
             raise RuntimeError(f"Failed to queue prompt on port {port}: {data}")
