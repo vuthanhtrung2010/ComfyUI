@@ -611,6 +611,9 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
     sdpa_keys = ("scale", "enable_gqa")
     sdpa_extra = {k: v for k, v in kwargs.items() if k in sdpa_keys}
 
+    if model_management.is_device_tpu(q.device):
+        q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+
     if SDP_BATCH_LIMIT >= b:
         out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, **sdpa_extra)
         if not skip_output_reshape:

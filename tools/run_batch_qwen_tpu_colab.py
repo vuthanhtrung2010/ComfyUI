@@ -132,15 +132,10 @@ def setup_environment():
         print("Cloning ComfyUI-GGUF...")
         run_cmd(["git", "clone", "https://github.com/city96/ComfyUI-GGUF.git", gguf_node_dir])
     
-    loader_path = os.path.join(gguf_node_dir, "loader.py")
-    if os.path.exists(loader_path):
-        with open(loader_path, "r") as f:
-            code = f.read()
-        code = code.replace('"qwen_image"', '"qwen_image", "qwen_image21"')
-        code = code.replace('raise ValueError(f"This model is not currently supported - ({e})")', 'arch_str = "qwen_image"')
-        with open(loader_path, "w") as f:
-            f.write(code)
-        print("ComfyUI-GGUF patches applied successfully.")
+    # Apply both Neptune Motion Qwen-Image 2.1 loader patches and TPU weight caching optimizations
+    patch_script = os.path.join(COMFY_DIR, "tools", "patch_comfyui_gguf.py")
+    if os.path.exists(patch_script):
+        run_cmd([sys.executable, patch_script, gguf_node_dir])
 
 def download_models():
     print("=== Step 2: Verifying Qwen-Image 2.1 Model Checkpoints ===")

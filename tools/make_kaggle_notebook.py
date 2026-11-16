@@ -82,15 +82,11 @@ nb = {
                 "    print(\"Cloning ComfyUI-GGUF node...\")\n",
                 "    subprocess.run([\"git\", \"clone\", \"https://github.com/city96/ComfyUI-GGUF.git\", gguf_dir], check=True)\n",
                 "\n",
-                "# Apply Neptune Motion patch for Qwen-Image 2.1 in loader.py\n",
-                "loader_py = os.path.join(gguf_dir, \"loader.py\")\n",
-                "with open(loader_py, \"r\", encoding=\"utf-8\") as f:\n",
-                "    src = f.read()\n",
-                "src = src.replace('\"qwen_image\"', '\"qwen_image\", \"qwen_image21\"')\n",
-                "src = src.replace('raise ValueError(f\"This model is not currently supported - ({e})\")', 'arch_str = \"qwen_image\"')\n",
-                "with open(loader_py, \"w\", encoding=\"utf-8\") as f:\n",
-                "    f.write(src)\n",
-                "print(\"ComfyUI-GGUF patched successfully for Qwen-Image 2.1!\")\n"
+                "# Apply Neptune Motion patch for Qwen-Image 2.1 and TPU weight caching\n",
+                "patch_script = os.path.join(COMFY_DIR, \"tools\", \"patch_comfyui_gguf.py\")\n",
+                "if os.path.exists(patch_script):\n",
+                "    subprocess.run([sys.executable, patch_script, gguf_dir], check=True)\n",
+                "print(\"ComfyUI-GGUF patched successfully for Qwen-Image 2.1 and weight caching!\")\n"
             ]
         },
         {
