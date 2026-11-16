@@ -142,8 +142,8 @@ def start_server():
 def build_workflow(p):
     return {
         "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "qwen-image-2.1-UC-Q4_K_M.gguf"}},
-        # OPTIMIZATION: device="cpu" keeps CLIP on 50GB host RAM, freeing TPU HBM completely for DiT + VAE!
-        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image", "device": "cpu"}},
+        # CLIP loaded to TPU (default) with automatic BF16 cast & dynamic offload
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}},
         "4": {"class_type": "TextEncodeQwenImage21", "inputs": {
             "clip": ["2", 0],

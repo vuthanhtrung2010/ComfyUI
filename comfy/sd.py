@@ -263,12 +263,18 @@ class CLIP:
 
         self.cond_stage_model = clip(**(params))
 
-        for dt in self.cond_stage_model.dtypes:
+        for dt in list(self.cond_stage_model.dtypes):
             if not model_management.supports_cast(load_device, dt):
-                load_device = offload_device
-                if params['device'] != offload_device:
-                    self.cond_stage_model.to(offload_device)
-                    logging.warning("Had to shift TE back.")
+                if model_management.is_device_tpu(load_device) and dt == torch.float16:
+                    self.cond_stage_model.to(torch.bfloat16)
+                    self.cond_stage_model.dtypes.remove(dt)
+                    self.cond_stage_model.dtypes.add(torch.bfloat16)
+                    logging.info("Converted text encoder from float16 to bfloat16 for TPU execution.")
+                else:
+                    load_device = offload_device
+                    if params['device'] != offload_device:
+                        self.cond_stage_model.to(offload_device)
+                        logging.warning("Had to shift TE back.")
 
         model_management.archive_model_dtypes(self.cond_stage_model)
 

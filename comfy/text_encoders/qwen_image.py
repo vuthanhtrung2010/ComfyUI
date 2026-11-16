@@ -92,6 +92,7 @@ def te(dtype_llama=None, llama_quantization_metadata=None):
                 model_options = model_options.copy()
                 model_options["quantization_metadata"] = llama_quantization_metadata
             if dtype_llama is not None:
-                dtype = dtype_llama
+                target_device = model_options.get("load_device", comfy.model_management.text_encoder_device())
+                dtype = comfy.model_management.pick_weight_dtype(dtype_llama, dtype, target_device)
             super().__init__(device=device, dtype=dtype, model_options=model_options)
     return QwenImageTEModel_

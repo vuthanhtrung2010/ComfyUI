@@ -44,5 +44,21 @@ class TestTPUModelManagement(unittest.TestCase):
         name = mm.get_torch_device_name(mock_device)
         self.assertIn("TPU", name)
 
+    def test_text_encoder_dtype_tpu(self):
+        import comfy.model_management as mm
+        mock_device = MagicMock()
+        mock_device.type = "tpu"
+        with patch.object(mm, "should_use_bf16", return_value=True):
+            dtype = mm.text_encoder_dtype(mock_device)
+            self.assertEqual(dtype, torch.bfloat16)
+
+    def test_pick_weight_dtype_tpu_fallback(self):
+        import comfy.model_management as mm
+        mock_device = MagicMock()
+        mock_device.type = "tpu"
+        with patch.object(mm, "supports_cast", return_value=False):
+            dtype = mm.pick_weight_dtype(torch.float16, torch.bfloat16, mock_device)
+            self.assertEqual(dtype, torch.bfloat16)
+
 if __name__ == "__main__":
     unittest.main()

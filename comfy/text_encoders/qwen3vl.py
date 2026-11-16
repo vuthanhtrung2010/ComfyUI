@@ -214,7 +214,8 @@ def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen3vl_8
     class Qwen3VLTEModel_(base):
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if dtype_llama is not None:
-                dtype = dtype_llama
+                target_device = model_options.get("load_device", comfy.model_management.text_encoder_device())
+                dtype = comfy.model_management.pick_weight_dtype(dtype_llama, dtype, target_device)
             if llama_quantization_metadata is not None:
                 model_options = model_options.copy()
                 model_options["quantization_metadata"] = llama_quantization_metadata

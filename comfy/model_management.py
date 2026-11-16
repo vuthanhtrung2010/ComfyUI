@@ -1304,6 +1304,9 @@ def text_encoder_dtype(device=None):
     elif args.fp32_text_enc:
         return torch.float32
 
+    if should_use_bf16(device):
+        return torch.bfloat16
+
     if is_device_cpu(device):
         return torch.float16
 
