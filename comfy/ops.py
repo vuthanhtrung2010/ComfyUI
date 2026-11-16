@@ -1565,6 +1565,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 self.tensor_class = None
                 self._full_precision_mm = MixedPrecisionOps._full_precision_mm
                 self._full_precision_mm_config = False
+                self._cached_dequant = None
 
             def reset_parameters(self):
                 return None
@@ -1595,7 +1596,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         want_requant=want_requant,
                     ) as (weight, bias):
                         if self._full_precision_mm and isinstance(weight, QuantizedTensor):
-                            weight = weight.dequantize()
+                            if getattr(self, "_cached_dequant", None) is None or self._cached_dequant.device != input.device:
+                                self._cached_dequant = weight.dequantize()
+                            weight = self._cached_dequant
                         return self._forward(input, weight, bias)
 
                 with CastBiasWeightContext(
@@ -1696,6 +1699,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 self.weight = torch.nn.Parameter(weight, requires_grad=False)
 
             def _apply(self, fn, recurse=True):  # This is to get torch.compile + moving weights to another device working
+                self._cached_dequant = None
                 return _quantized_apply(self, fn, recurse)
 
         class MoEExperts(torch.nn.Module, MixedPrecisionOp):
