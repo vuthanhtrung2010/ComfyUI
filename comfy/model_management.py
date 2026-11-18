@@ -1363,6 +1363,8 @@ def supports_dtype(device, dtype): #TODO
         return True
     if is_device_cpu(device):
         return False
+    if is_device_tpu(device) or (device is None and is_tpu()):
+        return dtype == torch.bfloat16
     if dtype == torch.float16:
         return True
     if dtype == torch.bfloat16:
@@ -1862,6 +1864,8 @@ def xformers_enabled():
         return False
     if is_ixuca():
         return False
+    if is_tpu():
+        return False
     return XFORMERS_IS_AVAILABLE
 
 
@@ -1898,6 +1902,8 @@ def pytorch_attention_flash_attention():
         if is_amd():
             return True #if you have pytorch attention enabled on AMD it probably supports at least mem efficient attention
         if is_ixuca():
+            return True
+        if is_tpu():
             return True
     return False
 
@@ -2220,6 +2226,9 @@ def supports_fp64(device=None):
     if is_ixuca():
         return False
 
+    if is_tpu() or (device is not None and is_device_tpu(device)):
+        return False
+
     return True
 
 def supports_int8_compute(device=None):
@@ -2236,6 +2245,9 @@ def supports_int8_compute(device=None):
         return False
 
     if is_ixuca():
+        return False
+
+    if is_tpu() or (device is not None and is_device_tpu(device)):
         return False
 
     return True

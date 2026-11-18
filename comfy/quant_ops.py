@@ -6,6 +6,7 @@ from comfy.cli_args import args
 
 try:
     import comfy_kitchen as ck
+    from comfy_kitchen.backends.eager.quantization import _build_hadamard, _rotate_activation
     from comfy_kitchen.tensor import (
         QuantizedTensor,
         QuantizedLayout,
@@ -68,6 +69,9 @@ except ImportError as e:
 
     def get_layout_class(name):
         return None
+
+    _build_hadamard = None
+    _rotate_activation = None
 
 _CK_MXFP8_AVAILABLE = False
 if _CK_AVAILABLE:
@@ -265,6 +269,22 @@ QUANT_ALGOS["w6a8_int8"] = {
 }
 
 
+def int8_tensorwise_linear(x, weight, bias=None):
+    """Execute full-precision linear on INT8 tensorwise weights by rotating activations (ConvRot) and scaling after F.linear."""
+    params = weight._params
+    qdata = weight._qdata
+    if getattr(params, "convrot", False):
+        gs = params.convrot_groupsize
+        h = _build_hadamard(gs, device=x.device, dtype=x.dtype)
+        x = _rotate_activation(x, h, gs)
+    out = torch.nn.functional.linear(x, qdata.to(dtype=x.dtype))
+    scale = params.scale.to(device=out.device, dtype=torch.float32).reshape(-1)
+    out = (out.float() * scale).to(dtype=x.dtype)
+    if bias is not None:
+        out = out + bias
+    return out
+
+
 # ==============================================================================
 # Re-exports for backward compatibility
 # ==============================================================================
@@ -281,4 +301,5 @@ __all__ = [
     "AsymW4A8Int8Layout",
     "QUANT_ALGOS",
     "register_layout_op",
+    "int8_tensorwise_linear",
 ]

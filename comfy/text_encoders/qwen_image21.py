@@ -1,7 +1,9 @@
 import numbers
 
 import torch
+import torch.nn.functional as F
 
+import comfy.model_management
 import comfy.text_encoders.qwen3vl
 from comfy import sd1_clip
 
@@ -37,6 +39,13 @@ class QwenImage21Qwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):
     def process_tokens(self, tokens, device):
         embeds, attention_mask, num_tokens, embeds_info = super().process_tokens(tokens, device)
         self.image_spans = [(e["index"], e["size"]) for e in embeds_info if e["type"] == "image"]
+        if comfy.model_management.is_device_tpu(device) and embeds.shape[0] == 1:
+            seq_len = embeds.shape[1]
+            bucket_len = ((seq_len + 63) // 64) * 64
+            if bucket_len > seq_len:
+                pad_len = bucket_len - seq_len
+                embeds = F.pad(embeds, (0, 0, 0, pad_len))
+                attention_mask = F.pad(attention_mask, (0, pad_len))
         return embeds, attention_mask, num_tokens, embeds_info
 
 
@@ -59,6 +68,8 @@ class QwenImage21TEModel(sd1_clip.SD1ClipModel):
                 offset += next(spans, (0, 1))[1] - 1
         keep = torch.ones(out.shape[1], dtype=torch.bool)
         keep[:im_starts[1] if len(im_starts) > 1 else 0] = False
+        if "attention_mask" in extra:
+            keep &= extra["attention_mask"][0].to(device="cpu", dtype=torch.bool)
 
         # vision tokens are replaced by reference latents in the DiT: drop them and record where each image goes
         # with no latents coming (no vae) they stay, and the image conditions through the text encoder alone
