@@ -106,7 +106,8 @@ if __name__ == "__main__":
 
     if args.tpu_device is not None:
         os.environ['TPU_VISIBLE_DEVICES'] = str(args.tpu_device)
-        logging.info("Set TPU visible device to: {}".format(args.tpu_device))
+        os.environ['TPU_VISIBLE_CHIPS'] = str(args.tpu_device)
+        logging.info("Set TPU visible device/chip to: {}".format(args.tpu_device))
 
     if args.oneapi_device_selector is not None:
         os.environ['ONEAPI_DEVICE_SELECTOR'] = args.oneapi_device_selector

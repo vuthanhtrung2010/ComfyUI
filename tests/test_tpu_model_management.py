@@ -135,5 +135,21 @@ class TestTPUModelManagement(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (1, 59, 16))
         self.assertNotIn("attention_mask", extra)
 
+    def test_tpu_cluster_manager_8_core_isolation(self):
+        from tools.tpu_orchestrator import TPUClusterManager
+        mgr = TPUClusterManager(cores=8, base_port=8188)
+        specs = mgr.get_instance_specs()
+        self.assertEqual(len(specs), 8)
+        ports = [s["port"] for s in specs]
+        self.assertEqual(ports, list(range(8188, 8196)))
+        proc_ports = {s["env"]["TPU_PROCESS_PORT"] for s in specs}
+        metric_ports = {p for s in specs for p in s["env"]["TPU_RUNTIME_METRICS_PORTS"].split(",")}
+        self.assertEqual(len(proc_ports), 8)
+        self.assertEqual(len(metric_ports), 32)
+        for idx, s in enumerate(specs):
+            self.assertEqual(s["env"]["TPU_VISIBLE_CHIPS"], str(idx))
+            self.assertEqual(s["env"]["TPU_VISIBLE_DEVICES"], str(idx))
+            self.assertEqual(s["env"]["TPU_CHIPS_PER_HOST_BOUNDS"], "1,1,1")
+
 if __name__ == "__main__":
     unittest.main()

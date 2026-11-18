@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import glob
 import json
 import logging
 import os
@@ -48,12 +49,29 @@ class TPUClusterManager:
 
     def get_instance_specs(self) -> List[Dict[str, Any]]:
         """Return configuration specifications for each TPU core instance."""
+        is_vfio_tpu = bool(glob.glob("/dev/vfio/[0-9]*"))
+        has_tcmalloc = os.path.exists("/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4")
         specs = []
         for core_id in range(self.cores):
             port = self.base_port + core_id
+            base_metric = 8431 + core_id * 4
             env_vars = {
                 "TPU_VISIBLE_DEVICES": str(core_id),
+                "TPU_VISIBLE_CHIPS": str(core_id),
+                "TPU_CHIPS_PER_HOST_BOUNDS": "1,1,1",
+                "TPU_HOST_BOUNDS": "1,1,1",
+                "TPU_WORKER_ID": "0",
+                "TPU_WORKER_HOSTNAMES": "localhost",
+                "TPU_SKIP_MDS_QUERY": "1",
+                "PJRT_DEVICE": "TPU",
+                "TPU_PROCESS_PORT": str(8476 + core_id),
+                "TPU_RUNTIME_METRICS_PORTS": f"{base_metric},{base_metric + 1},{base_metric + 2},{base_metric + 3}",
+                "OMP_NUM_THREADS": "4",
             }
+            if is_vfio_tpu:
+                env_vars["TPU_ACCELERATOR_TYPE"] = "v5litepod-1"
+            if has_tcmalloc:
+                env_vars["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4"
             specs.append({
                 "core_id": core_id,
                 "port": port,
@@ -73,6 +91,10 @@ class TPUClusterManager:
         for spec in self.get_instance_specs():
             core_id = spec["core_id"]
             port = spec["port"]
+            user_dir = f"/tmp/comfy_user_core_{core_id}"
+            temp_dir = f"/tmp/comfy_temp_core_{core_id}"
+            os.makedirs(user_dir, exist_ok=True)
+            os.makedirs(temp_dir, exist_ok=True)
 
             cmd = [
                 self.python_executable,
@@ -80,11 +102,15 @@ class TPUClusterManager:
                 "--port", str(port),
                 "--listen", self.host,
                 "--tpu-device", str(core_id),
+                "--database-url", "sqlite:///:memory:",
+                "--user-directory", user_dir,
+                "--temp-directory", temp_dir,
             ] + self.extra_args
 
             instance_env = os.environ.copy()
             instance_env.update(spec["env"])
 
+            log_file = None
             stdout_dest = subprocess.DEVNULL
             stderr_dest = subprocess.DEVNULL
             if log_dir:
@@ -97,10 +123,13 @@ class TPUClusterManager:
                 cmd,
                 cwd=self.comfy_root,
                 env=instance_env,
+                stdin=subprocess.DEVNULL,
                 stdout=stdout_dest,
                 stderr=stderr_dest,
                 preexec_fn=os.setsid if os.name != "nt" else None,
             )
+            if log_file is not None:
+                log_file.close()
 
             self.processes.append({
                 "core_id": core_id,
