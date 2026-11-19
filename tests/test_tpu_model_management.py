@@ -202,5 +202,18 @@ class TestTPUModelManagement(unittest.TestCase):
             cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
             self.assertGreater(cos, 0.999999)
 
+    def test_get_free_memory_tpu_clamps_negative_reserved_delta(self):
+        import comfy.model_management as mm
+        tpu_dev = MagicMock()
+        tpu_dev.type = "tpu"
+        total = 16 * 1024 ** 3
+        free = 6 * 1024 ** 3
+        with patch.object(torch.accelerator, "get_memory_info", return_value=(free, total)), \
+             patch.object(torch.accelerator, "memory_allocated", return_value=9 * 1024 ** 3), \
+             patch.object(torch.accelerator, "memory_reserved", return_value=1 * 1024 ** 3):
+            got_total, got_torch = mm.get_free_memory(tpu_dev, torch_free_too=True)
+            self.assertEqual(got_torch, 0)
+            self.assertEqual(got_total, free)
+
 if __name__ == "__main__":
     unittest.main()

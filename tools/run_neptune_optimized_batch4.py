@@ -503,7 +503,7 @@ def submit_and_wait(workflow, label, timeout=900):
                 last_print = elapsed
                 print(f"  [{label}] {elapsed:.0f}s elapsed...", flush=True)
             try:
-                h_req = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
+                h_req = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}", timeout=15)
                 history = json.loads(h_req.read().decode())
                 if prompt_id in history:
                     entry = history[prompt_id]

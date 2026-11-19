@@ -1939,18 +1939,18 @@ def get_free_memory(dev=None, torch_free_too=False):
         mem_free_torch = mem_free_total
     elif (hasattr(dev, 'type') and dev.type == 'tpu') or is_tpu():
         try:
-            mem_free, _ = torch.accelerator.get_memory_info(dev)
+            mem_free, mem_total = torch.accelerator.get_memory_info(dev)
             mem_active = torch.accelerator.memory_allocated(dev)
             mem_reserved = torch.accelerator.memory_reserved(dev)
-            mem_free_torch = mem_reserved - mem_active
-            mem_free_total = mem_free + mem_free_torch
+            mem_free_torch = max(0, mem_reserved - mem_active)
+            mem_free_total = min(mem_total, mem_free + mem_free_torch)
         except Exception:
             try:
-                mem_free, _ = torch.tpu.get_memory_info(dev)
+                mem_free, mem_total = torch.tpu.get_memory_info(dev)
                 mem_active = torch.tpu.memory_allocated(dev)
                 mem_reserved = torch.tpu.memory_reserved(dev)
-                mem_free_torch = mem_reserved - mem_active
-                mem_free_total = mem_free + mem_free_torch
+                mem_free_torch = max(0, mem_reserved - mem_active)
+                mem_free_total = min(mem_total, mem_free + mem_free_torch)
             except Exception:
                 mem_free_total = 14 * 1024 * 1024 * 1024
                 mem_free_torch = mem_free_total
@@ -2312,8 +2312,11 @@ def soft_empty_cache(force=False):
     elif is_tpu():
         try:
             if hasattr(torch, "accelerator"):
+                torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
             elif hasattr(torch, "tpu"):
+                if hasattr(torch.tpu, "synchronize"):
+                    torch.tpu.synchronize()
                 torch.tpu.empty_cache()
         except Exception:
             pass

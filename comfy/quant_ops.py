@@ -288,7 +288,10 @@ def _get_tpu_compiled_w8a16():
     if not _TPU_COMPILE_INIT:
         _TPU_COMPILE_INIT = True
         if hasattr(torch, "_dynamo") and "tpu" in torch._dynamo.list_backends():
-            torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
+            if hasattr(torch._dynamo.config, "recompile_limit"):
+                torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
+            if hasattr(torch._dynamo.config, "cache_size_limit"):
+                torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
             _TPU_COMPILED_W8A16_CONVROT = torch.compile(_int8_w8a16_convrot_bf16, backend="tpu")
             _TPU_COMPILED_W8A16 = torch.compile(_int8_w8a16_bf16, backend="tpu")
     return _TPU_COMPILED_W8A16_CONVROT, _TPU_COMPILED_W8A16
