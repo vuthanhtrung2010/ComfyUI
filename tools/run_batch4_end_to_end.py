@@ -8,9 +8,9 @@ import subprocess
 import shutil
 
 COLAB_CLI = "/home/devtrung/.local/bin/colab"
-SESSION = "comfy-batch4"
+SESSION = "comfy-batch5"
 REPO_DIR = "/home/devtrung/orca/ComfyUI"
-OUT_DIR = "/home/devtrung/orca/ComfyUI/output/neptune_batch4"
+OUT_DIR = "/home/devtrung/orca/ComfyUI/output/neptune_batch5"
 ARTIFACT_DIR = "/home/devtrung/.gemini/antigravity-cli/brain/55517722-56f8-4d5b-a54c-8f67dac28dc1"
 
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -81,9 +81,13 @@ print("Base repo ready at /content/ComfyUI", flush=True)
 
     files_to_upload = [
         ("comfy/model_management.py", "/content/ComfyUI/comfy/model_management.py"),
+        ("comfy/model_patcher.py", "/content/ComfyUI/comfy/model_patcher.py"),
         ("comfy/quant_ops.py", "/content/ComfyUI/comfy/quant_ops.py"),
         ("comfy/ops.py", "/content/ComfyUI/comfy/ops.py"),
+        ("comfy/sd1_clip.py", "/content/ComfyUI/comfy/sd1_clip.py"),
+        ("comfy/text_encoders/qwen3vl.py", "/content/ComfyUI/comfy/text_encoders/qwen3vl.py"),
         ("comfy/text_encoders/qwen_image21.py", "/content/ComfyUI/comfy/text_encoders/qwen_image21.py"),
+        ("comfy/ldm/qwen_image21/model.py", "/content/ComfyUI/comfy/ldm/qwen_image21/model.py"),
         ("tools/run_neptune_optimized_batch4.py", "/content/ComfyUI/tools/run_neptune_optimized_batch4.py"),
     ]
     try:
@@ -103,21 +107,28 @@ print("Base repo ready at /content/ComfyUI", flush=True)
 
 
 def run_microbench():
-    print("=== Step 2b: Running TPU INT8 ConvRot Micro-Benchmark ===", flush=True)
-    cmd = [
-        COLAB_CLI, "--auth=oauth2", "exec", "-s", SESSION,
-        "--env", "COMFY_NO_GIT_PULL=1",
-        "--env", "COMFY_MICROBENCH=1",
-        "-f", "tools/run_neptune_optimized_batch4.py",
-        "--timeout", "300"
-    ]
-    rc, output = stream_cmd(cmd)
+    print("=== Step 2b: Running Subprocess TPU Micro-Benchmark ===", flush=True)
+    runner_code = """
+import subprocess, sys
+res = subprocess.run(
+    [sys.executable, "/content/ComfyUI/tools/run_neptune_optimized_batch4.py", "--no-git-pull", "--microbench"],
+    check=False,
+)
+sys.exit(res.returncode)
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
+        tf.write(runner_code)
+        tf_path = tf.name
+    try:
+        rc, output = stream_cmd([COLAB_CLI, "--auth=oauth2", "exec", "-s", SESSION, "-f", tf_path, "--timeout", "600"])
+    finally:
+        os.unlink(tf_path)
     subprocess.run([
         COLAB_CLI, "--auth=oauth2", "download", "-s", SESSION,
         "/content/microbench_result.json", os.path.join(OUT_DIR, "microbench_result.json")
     ], capture_output=True, text=True)
-    if "REPLAN_TRIGGER" in output or rc != 0:
-        raise RuntimeError(f"Microbench halted execution (rc={rc}). Check output/microbench_result.json")
+    if rc != 0:
+        raise RuntimeError(f"Microbench halted execution (rc={rc}).")
 
 
 def execute_batch():
@@ -156,7 +167,8 @@ def download_artifacts():
             shutil.copy(local, os.path.join(ARTIFACT_DIR, f))
 
     for remote, name, copy_art in [
-        ("/content/neptune3_batch4_results.json", "neptune3_batch4_results.json", True),
+        ("/content/neptune3_batch4_results.json", "neptune3_batch5_results.json", True),
+        ("/content/microbench_result.json", "microbench_result.json", False),
         ("/content/comfyui.log", "comfyui.log", False),
     ]:
         local = os.path.join(OUT_DIR, name)

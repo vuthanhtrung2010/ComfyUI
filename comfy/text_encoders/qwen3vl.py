@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from transformers import Qwen2Tokenizer
 
 from comfy import sd1_clip
+import comfy.model_management
 import comfy.text_encoders.qwen_vl
 from .qwen35 import Qwen35VisionModel
 from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_2BConfig, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
@@ -64,7 +65,8 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
         if embed["type"] == "image":
             # Qwen3-VL normalizes to [-1, 1] (mean/std 0.5), unlike Qwen2.5-VL's CLIP normalization.
             image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
-            merged, deepstack = self.visual(image.to(device, dtype=torch.float32), grid)
+            vis_dtype = torch.bfloat16 if comfy.model_management.is_device_tpu(device) and self.dtype == torch.bfloat16 else torch.float32
+            merged, deepstack = self.visual(image.to(device, dtype=vis_dtype), grid)
             return merged, {"grid": grid, "deepstack": deepstack}
         return None, None
 

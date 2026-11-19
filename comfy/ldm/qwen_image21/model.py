@@ -215,13 +215,13 @@ def block_causal_attention(segments, transformer_options={}, cache=None, block_i
     return attn
 
 
-def prefix_cached_attention(prefix_k, prefix_v, transformer_options={}):
+def prefix_cached_attention(prefix_k, prefix_v, transformer_options={}, mask=None):
     # target-only queries: block-causal reduces to full attention over [cached prefix, target]
     def attn(q, k, v, heads, preferred_attention=None):
         q = AttentionTensorContainer(q.take().flatten(2))
         k = AttentionTensorContainer(torch.cat([prefix_k, k.take()], dim=1).flatten(2))
         v = AttentionTensorContainer(torch.cat([prefix_v, v.take()], dim=1).flatten(2))
-        return optimized_attention(q, k, v, heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
+        return optimized_attention(q, k, v, heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
     return attn
 
 
@@ -386,7 +386,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         cache.select(key)
         return cache, False
 
-    def build_sequence(self, x, context, ref_latents, image_slots):
+    def build_sequence(self, x, context, ref_latents, image_slots, real_txt_len=None, target_mask=None):
         # text with each reference image spliced in at its slot, target image last
         txt = self.txt_in(context)
         slots = (image_slots + [txt.shape[1]] * len(ref_latents))[:len(ref_latents)]
@@ -394,13 +394,14 @@ class QwenImage21Transformer2DModel(nn.Module):
 
         parts, ids, segments = [], [], []
         pos, length = 0, 0
-        for (start, end), img in zip(zip(bounds[:-1], bounds[1:]), ref_latents + [x]):
+        imgs = ref_latents + [x]
+        for idx, ((start, end), img) in enumerate(zip(zip(bounds[:-1], bounds[1:]), imgs)):
             n = end - start
             if n > 0:
                 parts.append(txt[:, start:end])
                 ids.append(torch.arange(pos, pos + n, device=x.device, dtype=torch.float32).unsqueeze(1).expand(n, 3))
                 segments.append((length, length + n, torch.ones((n, length + n), dtype=torch.bool, device=x.device).tril(length)))
-                pos += n
+                pos += real_txt_len if real_txt_len is not None and idx == len(imgs) - 1 else n
                 length += n
             h, w = img.shape[-2:]
             parts.append(self.img_in(img.flatten(2).transpose(1, 2)))
@@ -408,7 +409,8 @@ class QwenImage21Transformer2DModel(nn.Module):
             hh = torch.arange(h, device=x.device, dtype=torch.float32) - (h - h // 2) + 0.5 * (h % 2 - x.shape[-2] % 2)
             ww = torch.arange(w, device=x.device, dtype=torch.float32) - (w - w // 2) + 0.5 * (w % 2 - x.shape[-1] % 2)
             ids.append(torch.stack([torch.full((h, w), pos, device=x.device, dtype=torch.float32), hh[:, None].expand(h, w), ww[None, :].expand(h, w)], dim=-1).flatten(0, 1))
-            segments.append((length, length + h * w, None))
+            seg_mask = target_mask if idx == len(imgs) - 1 else None
+            segments.append((length, length + h * w, seg_mask))
             pos += max(h, w)
             length += h * w
 
@@ -429,7 +431,20 @@ class QwenImage21Transformer2DModel(nn.Module):
         ref_latents = list(ref_latents or [])
         image_slots = list(image_slots or [])
 
-        hidden_states, pe, segments = self.build_sequence(x, context, ref_latents, image_slots)
+        raw_context = context
+        real_txt_len = None
+        prefix_mask = None
+        if comfy.model_management.is_device_tpu(x.device) and prefix_cache is None and len(ref_latents) == 0 and context.shape[1] > 0:
+            real_txt_len = context.shape[1]
+            bucket_len = ((real_txt_len + 127) // 128) * 128
+            if bucket_len > real_txt_len:
+                context = F.pad(context, (0, 0, 0, bucket_len - real_txt_len))
+            # torch_tpu SDPA produces NaN when attn_mask broadcasts over Q (dim -2 == 1); expand explicitly to (1, 1, Q, K).
+            prefix_mask = torch.ones((1, 1, H * W, bucket_len + H * W), dtype=torch.bool, device=x.device)
+            if bucket_len > real_txt_len:
+                prefix_mask[..., real_txt_len:bucket_len] = False
+
+        hidden_states, pe, segments = self.build_sequence(x, context, ref_latents, image_slots, real_txt_len=real_txt_len, target_mask=prefix_mask)
         prefix_len = hidden_states.shape[1] - H * W
         patches = transformer_options.get("patches", {})
         for p in patches.get("post_input", []):
@@ -445,7 +460,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
         cache, cached = None, False
         if prefix_len > 0 and self.can_cache_prefix(transformer_options):
-            key = prefix_cache_key(x, context, ref_latents, image_slots)
+            key = prefix_cache_key(x, raw_context, ref_latents, image_slots)
             options = transformer_options.get("qwen_image21_cache", {})
             if prefix_cache is not None and x.device in prefix_cache:
                 cache = PrefixCache(prefix_cache[x.device])
@@ -480,7 +495,7 @@ class QwenImage21Transformer2DModel(nn.Module):
                     prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
                     if cached and not isinstance(cache, PrefixCache):
                         cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
-                    attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options)
+                    attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options, mask=prefix_mask)
                 else:
                     attn_fn = block_causal_attention(segments, transformer_options, cache, i, prefix_len)
                 if ("single_block", i) in blocks_replace:

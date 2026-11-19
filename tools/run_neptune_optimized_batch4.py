@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Run 3 new Neptune Motion production images at 25 steps with native Uncensored INT8 ConvRot DiT, CLIP on TPU, W8A16 fused ConvRot linear, FlashAttention memory accounting, 64-token bucket padding, and staged batch DAG."""
 import argparse
+import asyncio
 import dataclasses
 import os
 import re
 import shutil
 import sys
+import threading
 import time
 import json
+import uuid
 import urllib.request
 import urllib.error
 import subprocess
@@ -150,44 +153,69 @@ def run_tpu_microbench():
             print(f"  [{name}] ERROR: {e}", flush=True)
             return None
 
-    out_w8a16 = bench_fn("w8a16_int8_tensorwise_linear", lambda: comfy.quant_ops.int8_tensorwise_linear(x_tpu, qt_tpu))
-    out_ck = bench_fn(
-        "ck_int8_linear_w8a8",
-        lambda: ck.int8_linear(
-            x_tpu, qt_tpu._qdata, qt_tpu._params.scale, None, torch.bfloat16, convrot=True, convrot_groupsize=256
-        ),
-    )
+    def fp32_scale_w8a16():
+        params = qt_tpu._params
+        qdata = qt_tpu._qdata
+        gs = params.convrot_groupsize
+        h = comfy.quant_ops._build_hadamard(gs, device=x_tpu.device, dtype=x_tpu.dtype)
+        xr = comfy.quant_ops._rotate_activation(x_tpu, h, gs)
+        out = torch.nn.functional.linear(xr, qdata.to(dtype=x_tpu.dtype))
+        sc = params.scale.to(device=out.device, dtype=torch.float32).reshape(-1)
+        return (out.float() * sc).to(dtype=x_tpu.dtype)
+
+    out_w8a16 = bench_fn("w8a16_bf16_scale", lambda: comfy.quant_ops.int8_tensorwise_linear(x_tpu, qt_tpu))
+    out_w8a16_fp32 = bench_fn("w8a16_fp32_scale", fp32_scale_w8a16)
     out_deq = bench_fn("dequantize_plus_linear", lambda: torch.nn.functional.linear(x_tpu, qt_tpu.dequantize()))
 
     if out_deq is not None and out_w8a16 is not None:
         cos_w8a16 = torch.nn.functional.cosine_similarity(
             out_w8a16.flatten().float(), out_deq.flatten().float(), dim=0
         ).item()
-        results["cos_w8a16_vs_deq"] = round(cos_w8a16, 6)
-        print(f"  Cosine sim (W8A16 vs deq+linear): {cos_w8a16:.6f}", flush=True)
+        results["cos_w8a16_bf16_vs_deq"] = round(cos_w8a16, 6)
+        print(f"  Cosine sim (W8A16 bf16-scale vs deq+linear): {cos_w8a16:.6f}", flush=True)
 
-    cos_ck = None
-    if out_ck is not None and (out_deq is not None or out_w8a16 is not None):
-        ref = out_deq if out_deq is not None else out_w8a16
-        cos_ck = torch.nn.functional.cosine_similarity(
-            out_ck.flatten().float(), ref.flatten().float(), dim=0
+    if out_w8a16_fp32 is not None and out_w8a16 is not None:
+        cos_bf16_fp32 = torch.nn.functional.cosine_similarity(
+            out_w8a16.flatten().float(), out_w8a16_fp32.flatten().float(), dim=0
         ).item()
-        results["cos_ck_vs_ref"] = round(cos_ck, 6)
-        print(f"  Cosine sim (ck.int8_linear vs ref): {cos_ck:.6f}", flush=True)
+        results["cos_bf16_vs_fp32_scale"] = round(cos_bf16_fp32, 6)
+        print(f"  Cosine sim (bf16-scale vs fp32-scale): {cos_bf16_fp32:.6f}", flush=True)
+
+    # Benchmark SDPA mask variants on TPU (Q=2560, K=2688, H=32, D=128)
+    print("=== TPU Micro-Benchmark: SDPA Mask Variants ===", flush=True)
+    q = torch.randn(1, 32, 2560, 128, device=dev, dtype=torch.bfloat16)
+    k = torch.randn(1, 32, 2688, 128, device=dev, dtype=torch.bfloat16)
+    v = torch.randn(1, 32, 2688, 128, device=dev, dtype=torch.bfloat16)
+    bool_mask = torch.ones((1, 1, 1, 2688), dtype=torch.bool, device=dev)
+    bool_mask[..., 100:128] = False
+    bf16_mask = torch.zeros((1, 1, 1, 2688), dtype=torch.bfloat16, device=dev)
+    bf16_mask[..., 100:128] = torch.finfo(torch.bfloat16).min / 4
+    mm.synchronize(dev)
+
+    bench_fn("sdpa_no_mask", lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v))
+    out_bool = bench_fn("sdpa_bool_mask", lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bool_mask))
+    out_bf16m = bench_fn("sdpa_bf16_mask", lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bf16_mask))
+    if out_bool is not None and out_bf16m is not None:
+        cos_mask = torch.nn.functional.cosine_similarity(out_bool.flatten().float(), out_bf16m.flatten().float(), dim=0).item()
+        results["cos_sdpa_bool_vs_bf16_mask"] = round(cos_mask, 6)
+        print(f"  Cosine sim (bool mask vs bf16 mask): {cos_mask:.6f}", flush=True)
+
+    # Probe torch.compile backends on TPU
+    print("=== TPU Micro-Benchmark: torch.compile Linear Probe ===", flush=True)
+    results["dynamo_backends"] = list(torch._dynamo.list_backends())
+    print(f"  Available dynamo backends: {results['dynamo_backends']}", flush=True)
+    for backend in ("openxla", "inductor"):
+        if backend in results["dynamo_backends"]:
+            try:
+                fn_c = torch.compile(lambda a, b: torch.nn.functional.linear(a, b.to(dtype=a.dtype)), backend=backend)
+                bench_fn(f"compile_{backend}_w8a16_mm", lambda: fn_c(x_tpu, qt_tpu._qdata), warmup=2, iters=5)
+            except Exception as e:
+                results[f"compile_{backend}_w8a16_mm"] = {"status": "error", "error": repr(e)}
+                print(f"  [compile_{backend}_w8a16_mm] ERROR: {e}", flush=True)
 
     print("MICROBENCH_RESULT:", json.dumps(results), flush=True)
     with open("/content/microbench_result.json", "w") as f:
         json.dump(results, f, indent=2)
-
-    if (
-        results.get("ck_int8_linear_w8a8", {}).get("status") == "ok"
-        and results.get("w8a16_int8_tensorwise_linear", {}).get("status") == "ok"
-        and cos_ck is not None
-        and cos_ck > 0.9999
-        and results["ck_int8_linear_w8a8"]["ms_per_call"] < results["w8a16_int8_tensorwise_linear"]["ms_per_call"]
-    ):
-        print("REPLAN_TRIGGER: ck.int8_linear is faster and accurate on TPU!", flush=True)
-        return 2
     return 0
 
 
@@ -392,8 +420,63 @@ def build_single_workflow(p):
     }
 
 
+def _start_ws_node_profiler(client_id, stop_event, events):
+    """Record ComfyUI WebSocket 'executing' timestamps for exact per-node profiling."""
+    async def _listen():
+        try:
+            import aiohttp
+        except ImportError:
+            return
+        url = f"http://127.0.0.1:8188/ws?clientId={client_id}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(url, heartbeat=30) as ws:
+                    while not stop_event.is_set():
+                        try:
+                            msg = await asyncio.wait_for(ws.receive(), timeout=0.5)
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                payload = json.loads(msg.data)
+                            except Exception:
+                                continue
+                            if payload.get("type") == "executing":
+                                d = payload.get("data", {})
+                                events.append((time.time(), d.get("prompt_id"), d.get("node")))
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+        except Exception:
+            pass
+
+    def _runner():
+        asyncio.run(_listen())
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    return t
+
+
+def _summarize_node_timings(events, prompt_id, workflow):
+    filtered = [(ts, node) for ts, pid, node in events if pid == prompt_id]
+    timings = []
+    for i in range(len(filtered) - 1):
+        ts, node = filtered[i]
+        next_ts, _ = filtered[i + 1]
+        if node is not None:
+            cls = workflow.get(str(node), {}).get("class_type", "?")
+            timings.append({"node": str(node), "class_type": cls, "seconds": round(next_ts - ts, 3)})
+    return timings
+
+
 def submit_and_wait(workflow, label, timeout=900):
-    payload = json.dumps({"prompt": workflow}).encode("utf-8")
+    client_id = str(uuid.uuid4())
+    stop_event = threading.Event()
+    ws_events = []
+    ws_thread = _start_ws_node_profiler(client_id, stop_event, ws_events)
+    time.sleep(0.3)
+
+    payload = json.dumps({"prompt": workflow, "client_id": client_id}).encode("utf-8")
     req = urllib.request.Request(
         "http://127.0.0.1:8188/prompt",
         data=payload,
@@ -406,48 +489,62 @@ def submit_and_wait(workflow, label, timeout=900):
             prompt_id = data.get("prompt_id")
             print(f"[{label}] Queued prompt_id: {prompt_id}", flush=True)
     except urllib.error.HTTPError as e:
+        stop_event.set()
         body = e.read().decode(errors="replace")
         print(f"[{label}] HTTP {e.code} queueing prompt: {body}", flush=True)
         return {"status": "failed", "error": body, "duration_seconds": round(time.time() - t_start, 2)}
 
     last_print = 0
-    while time.time() - t_start < timeout:
-        time.sleep(3)
-        elapsed = time.time() - t_start
-        if elapsed - last_print >= 15:
-            last_print = elapsed
-            print(f"  [{label}] {elapsed:.0f}s elapsed...", flush=True)
-        try:
-            h_req = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
-            history = json.loads(h_req.read().decode())
-            if prompt_id in history:
-                entry = history[prompt_id]
-                status = entry.get("status", {})
-                if status.get("completed", False):
-                    duration = time.time() - t_start
-                    outputs = entry.get("outputs", {})
-                    files = []
-                    for node_out in outputs.values():
-                        for img in node_out.get("images", []):
-                            files.append(img["filename"])
-                    print(f"--> [{label}] COMPLETED in {duration:.2f}s. Files: {files}", flush=True)
-                    return {
-                        "status": "success",
-                        "prompt_id": prompt_id,
-                        "duration_seconds": round(duration, 2),
-                        "output_files": sorted(files),
-                    }
-                elif status.get("status_str") == "error":
-                    duration = time.time() - t_start
-                    print(f"--> [{label}] ERROR after {duration:.2f}s: {status}", flush=True)
-                    return {
-                        "status": "error",
-                        "prompt_id": prompt_id,
-                        "duration_seconds": round(duration, 2),
-                        "error": str(status),
-                    }
-        except Exception:
-            pass
+    try:
+        while time.time() - t_start < timeout:
+            time.sleep(2)
+            elapsed = time.time() - t_start
+            if elapsed - last_print >= 15:
+                last_print = elapsed
+                print(f"  [{label}] {elapsed:.0f}s elapsed...", flush=True)
+            try:
+                h_req = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
+                history = json.loads(h_req.read().decode())
+                if prompt_id in history:
+                    entry = history[prompt_id]
+                    status = entry.get("status", {})
+                    if status.get("completed", False):
+                        duration = time.time() - t_start
+                        time.sleep(0.3)
+                        stop_event.set()
+                        ws_thread.join(timeout=2)
+                        node_timings = _summarize_node_timings(ws_events, prompt_id, workflow)
+                        outputs = entry.get("outputs", {})
+                        files = []
+                        for node_out in outputs.values():
+                            for img in node_out.get("images", []):
+                                files.append(img["filename"])
+                        print(f"--> [{label}] COMPLETED in {duration:.2f}s. Files: {files}", flush=True)
+                        if node_timings:
+                            print(f"    Per-node timings [{label}]:", flush=True)
+                            for nt in node_timings:
+                                print(f"      - {nt['node']} ({nt['class_type']}): {nt['seconds']:.2f}s", flush=True)
+                        return {
+                            "status": "success",
+                            "prompt_id": prompt_id,
+                            "duration_seconds": round(duration, 2),
+                            "output_files": sorted(files),
+                            "node_timings": node_timings,
+                        }
+                    elif status.get("status_str") == "error":
+                        duration = time.time() - t_start
+                        stop_event.set()
+                        print(f"--> [{label}] ERROR after {duration:.2f}s: {status}", flush=True)
+                        return {
+                            "status": "error",
+                            "prompt_id": prompt_id,
+                            "duration_seconds": round(duration, 2),
+                            "error": str(status),
+                        }
+            except Exception:
+                pass
+    finally:
+        stop_event.set()
 
     return {"status": "timeout", "prompt_id": prompt_id, "duration_seconds": round(time.time() - t_start, 2)}
 

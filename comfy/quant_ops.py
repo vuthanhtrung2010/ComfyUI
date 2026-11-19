@@ -269,17 +269,59 @@ QUANT_ALGOS["w6a8_int8"] = {
 }
 
 
+def _int8_w8a16_convrot_bf16(x, qdata, scale, h, gs):
+    xr = torch.matmul(x.reshape(-1, x.shape[-1] // gs, gs), h).reshape(x.shape)
+    return torch.nn.functional.linear(xr, qdata.to(dtype=x.dtype)) * scale.to(dtype=x.dtype).reshape(-1)
+
+
+def _int8_w8a16_bf16(x, qdata, scale):
+    return torch.nn.functional.linear(x, qdata.to(dtype=x.dtype)) * scale.to(dtype=x.dtype).reshape(-1)
+
+
+_TPU_COMPILED_W8A16_CONVROT = None
+_TPU_COMPILED_W8A16 = None
+_TPU_COMPILE_INIT = False
+
+
+def _get_tpu_compiled_w8a16():
+    global _TPU_COMPILED_W8A16_CONVROT, _TPU_COMPILED_W8A16, _TPU_COMPILE_INIT
+    if not _TPU_COMPILE_INIT:
+        _TPU_COMPILE_INIT = True
+        if hasattr(torch, "_dynamo") and "tpu" in torch._dynamo.list_backends():
+            torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
+            _TPU_COMPILED_W8A16_CONVROT = torch.compile(_int8_w8a16_convrot_bf16, backend="tpu")
+            _TPU_COMPILED_W8A16 = torch.compile(_int8_w8a16_bf16, backend="tpu")
+    return _TPU_COMPILED_W8A16_CONVROT, _TPU_COMPILED_W8A16
+
+
 def int8_tensorwise_linear(x, weight, bias=None):
     """Execute full-precision linear on INT8 tensorwise weights by rotating activations (ConvRot) and scaling after F.linear."""
     params = weight._params
     qdata = weight._qdata
-    if getattr(params, "convrot", False):
-        gs = params.convrot_groupsize
-        h = _build_hadamard(gs, device=x.device, dtype=x.dtype)
-        x = _rotate_activation(x, h, gs)
-    out = torch.nn.functional.linear(x, qdata.to(dtype=x.dtype))
-    scale = params.scale.to(device=out.device, dtype=torch.float32).reshape(-1)
-    out = (out.float() * scale).to(dtype=x.dtype)
+    convrot = getattr(params, "convrot", False)
+    if x.dtype == torch.bfloat16:
+        scale = params.scale if params.scale.device == x.device else params.scale.to(device=x.device)
+        compiled_convrot, compiled_plain = _get_tpu_compiled_w8a16() if x.device.type == "tpu" else (None, None)
+        if convrot:
+            gs = params.convrot_groupsize
+            h = _build_hadamard(gs, device=x.device, dtype=x.dtype)
+            if compiled_convrot is not None:
+                out = compiled_convrot(x, qdata, scale, h, gs)
+            else:
+                out = _int8_w8a16_convrot_bf16(x, qdata, scale, h, gs)
+        else:
+            if compiled_plain is not None:
+                out = compiled_plain(x, qdata, scale)
+            else:
+                out = _int8_w8a16_bf16(x, qdata, scale)
+    else:
+        if convrot:
+            gs = params.convrot_groupsize
+            h = _build_hadamard(gs, device=x.device, dtype=x.dtype)
+            x = _rotate_activation(x, h, gs)
+        out = torch.nn.functional.linear(x, qdata.to(dtype=x.dtype))
+        scale = params.scale.to(device=out.device, dtype=torch.float32).reshape(-1)
+        out = (out.float() * scale).to(dtype=x.dtype)
     if bias is not None:
         out = out + bias
     return out

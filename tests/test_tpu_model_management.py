@@ -151,5 +151,56 @@ class TestTPUModelManagement(unittest.TestCase):
             self.assertEqual(s["env"]["TPU_VISIBLE_DEVICES"], str(idx))
             self.assertEqual(s["env"]["TPU_CHIPS_PER_HOST_BOUNDS"], "1,1,1")
 
+    def test_sdclip_compute_dtype_bf16_on_tpu(self):
+        from comfy import sd1_clip
+        m = sd1_clip.SDClipModel.__new__(sd1_clip.SDClipModel)
+        m.dtype = torch.bfloat16
+        tpu_dev = MagicMock()
+        tpu_dev.type = "tpu"
+        self.assertEqual(m._compute_dtype(tpu_dev), torch.bfloat16)
+        self.assertEqual(m._compute_dtype(torch.device("cpu")), torch.float32)
+        m.dtype = torch.float32
+        self.assertEqual(m._compute_dtype(tpu_dev), torch.float32)
+
+    def test_qwen21_dit_tpu_prefix_bucketing_equivalence(self):
+        import comfy.ops
+        import comfy.model_management as mm
+        from comfy.ldm.qwen_image21.model import QwenImage21Transformer2DModel
+
+        torch.manual_seed(42)
+        model = QwenImage21Transformer2DModel(
+            in_channels=16, out_channels=16, num_layers=2,
+            attention_head_dim=32, num_attention_heads=4,
+            context_in_dim=64, mlp_ratio=2, axes_dims_rope=(8, 12, 12),
+            dtype=torch.float32, device="cpu", operations=comfy.ops.disable_weight_init,
+        )
+        for p in model.parameters():
+            torch.nn.init.normal_(p, std=0.02)
+
+        x = torch.randn(1, 16, 4, 4, dtype=torch.float32)
+        t1 = torch.tensor([0.8], dtype=torch.float32)
+        t2 = torch.tensor([0.4], dtype=torch.float32)
+        ctx = torch.randn(1, 37, 64, dtype=torch.float32)
+
+        fake_patcher = MagicMock()
+        fake_patcher.is_dynamic.return_value = False
+        fake_patcher.get_free_memory.return_value = 10**10
+        model.current_patcher = fake_patcher
+
+        with torch.no_grad():
+            model.reset_prefix_cache(True)
+            ref1 = model(x, t1, ctx)
+            ref2 = model(x, t2, ctx)
+
+            model.reset_prefix_cache(True)
+            with patch.object(mm, "is_device_tpu", return_value=True):
+                tpu1 = model(x, t1, ctx)
+                tpu2 = model(x, t2, ctx)
+
+        for a, b in [(ref1, tpu1), (ref2, tpu2)]:
+            self.assertFalse(torch.isnan(b).any())
+            cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
+            self.assertGreater(cos, 0.999999)
+
 if __name__ == "__main__":
     unittest.main()

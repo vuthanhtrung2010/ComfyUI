@@ -1040,10 +1040,13 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         if not loaded_model.model.is_dynamic():
             total_pins_required[device] = total_pins_required.get(device, 0) + loaded_model.model_memory()
 
+    keep_loaded = models_to_load if len(models_to_load) == 1 else []
+
     for device in total_memory_required:
         if device != torch.device("cpu"):
             free_memory(total_memory_required[device] * 1.1 + extra_mem,
                         device,
+                        keep_loaded=keep_loaded,
                         for_dynamic=free_for_dynamic,
                         pins_required=total_pins_required.get(device, 0))
 
@@ -1051,8 +1054,10 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         if device != torch.device("cpu"):
             free_mem = get_free_memory(device)
             if free_mem < minimum_memory_required:
-                models_l = free_memory(minimum_memory_required, device, for_dynamic=free_for_dynamic)
+                models_l = free_memory(minimum_memory_required, device, keep_loaded=keep_loaded, for_dynamic=free_for_dynamic)
                 logging.info("{} models unloaded.".format(len(models_l)))
+                if len(models_l) == 0 and is_device_tpu(device):
+                    soft_empty_cache()
 
     for loaded_model in models_to_load:
         model = loaded_model.model

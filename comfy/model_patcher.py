@@ -1081,6 +1081,11 @@ class ModelPatcher:
 
                 mem_counter += move_weight_functions(m, device_to)
 
+            backup_cpu_weights = (
+                comfy.model_management.is_device_tpu(device_to)
+                and self.offload_device == torch.device("cpu")
+                and not self.weight_inplace_update
+            )
             load_completely.sort(reverse=True)
             for x in load_completely:
                 n = x[1]
@@ -1095,6 +1100,14 @@ class ModelPatcher:
                         comfy.ops.disable_weight_init._zero_init_parameter(m, param)
                     key = key_param_name_to_key(n, param)
                     self.unpin_weight(key)
+                    if (
+                        backup_cpu_weights
+                        and hasattr(m, "comfy_cast_weights")
+                        and key not in self.backup
+                        and key not in self.patches
+                        and param_value.device == self.offload_device
+                    ):
+                        self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(param_value.detach(), False)
                     self.patch_weight_to_device(key, device_to=device_to)
                 if comfy.model_management.is_device_cuda(device_to):
                     torch.cuda.synchronize()

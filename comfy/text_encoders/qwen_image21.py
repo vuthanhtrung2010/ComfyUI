@@ -41,7 +41,7 @@ class QwenImage21Qwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):
         self.image_spans = [(e["index"], e["size"]) for e in embeds_info if e["type"] == "image"]
         if comfy.model_management.is_device_tpu(device) and embeds.shape[0] == 1:
             seq_len = embeds.shape[1]
-            bucket_len = ((seq_len + 63) // 64) * 64
+            bucket_len = ((seq_len + 127) // 128) * 128
             if bucket_len > seq_len:
                 pad_len = bucket_len - seq_len
                 embeds = F.pad(embeds, (0, 0, 0, pad_len))
