@@ -444,6 +444,43 @@ class CLIP:
         tokens = self.tokenize(text)
         return self.encode_from_tokens(tokens)
 
+    def encode_from_tokens_batch(self, tokens_list):
+        if len(tokens_list) == 1:
+            return self.encode_from_tokens_scheduled(tokens_list[0])
+        if hasattr(self.cond_stage_model, "encode_token_weights_batch"):
+            self.cond_stage_model.reset_clip_options()
+            if self.layer_idx is not None:
+                self.cond_stage_model.set_clip_options({"layer": self.layer_idx})
+            self.load_model(tokens_list[0])
+            device = self.patcher.load_device
+            self.cond_stage_model.set_clip_options({"execution_device": device})
+            with model_management.cuda_device_context(device):
+                o = self.cond_stage_model.encode_token_weights_batch(tokens_list)
+            cond, pooled = o[:2]
+            pooled_dict = {"pooled_output": pooled}
+            if len(o) > 2:
+                pooled_dict.update(o[2])
+            self.add_hooks_to_dict(pooled_dict)
+            return [[cond, pooled_dict]]
+
+        rows, pooled_out = [], None
+        for tokens in tokens_list:
+            entry = self.encode_from_tokens_scheduled(tokens)[0]
+            rows.append(entry[0][0])
+            if pooled_out is None:
+                pooled_out = entry[1].get("pooled_output", None)
+        max_len = max(r.shape[0] for r in rows)
+        batched = torch.zeros((len(rows), max_len, rows[0].shape[-1]), dtype=rows[0].dtype, device=rows[0].device)
+        mask = torch.zeros((len(rows), max_len), dtype=torch.long, device=rows[0].device)
+        for idx, r in enumerate(rows):
+            batched[idx, :r.shape[0]] = r
+            mask[idx, :r.shape[0]] = 1
+        pooled_dict = {"pooled_output": pooled_out}
+        if mask.sum() != mask.numel():
+            pooled_dict["attention_mask"] = mask
+        self.add_hooks_to_dict(pooled_dict)
+        return [[batched, pooled_dict]]
+
     def load_sd(self, sd, full_model=False):
         if full_model:
             return self.cond_stage_model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())

@@ -215,5 +215,81 @@ class TestTPUModelManagement(unittest.TestCase):
             self.assertEqual(got_torch, 0)
             self.assertEqual(got_total, free)
 
+    def test_qwen21_te_batch_encode_and_pad(self):
+        from comfy.text_encoders import qwen3vl, qwen_image21
+
+        clip_model = qwen_image21.QwenImage21Qwen3VLClipModel.__new__(qwen_image21.QwenImage21Qwen3VLClipModel)
+        tpu_dev = MagicMock()
+        tpu_dev.type = "tpu"
+        raw_embeds = torch.randn(2, 70, 16)
+        raw_mask = torch.ones(2, 70, dtype=torch.long)
+        raw_mask[0, 50:] = 0
+        with patch.object(qwen3vl.Qwen3VLClipModel, "process_tokens", return_value=(raw_embeds, raw_mask, [50, 70], [])):
+            embeds, mask, num_tokens, _ = clip_model.process_tokens([[], []], tpu_dev)
+        self.assertEqual(tuple(embeds.shape), (2, 128, 16))
+        self.assertEqual(tuple(mask.shape), (2, 128))
+        self.assertEqual(int(mask[0].sum()), 50)
+        self.assertEqual(int(mask[1].sum()), 70)
+
+        te_model = qwen_image21.QwenImage21TEModel.__new__(qwen_image21.QwenImage21TEModel)
+        te_model.clip = "qwen3vl_8b"
+        te_model.clip_name = "qwen3vl_8b"
+        fake_clip = MagicMock()
+        fake_out = torch.randn(2, 128, 16)
+        fake_clip.encode.return_value = (fake_out, None, {"attention_mask": mask})
+        te_model.qwen3vl_8b = fake_clip
+        twp0 = {"qwen3vl_8b": [[(151644, 1.0)] + [(10, 1.0)] * 9 + [(151644, 1.0)] + [(20, 1.0)] * 39]}
+        twp1 = {"qwen3vl_8b": [[(151644, 1.0)] + [(10, 1.0)] * 9 + [(151644, 1.0)] + [(30, 1.0)] * 59]}
+        batched, _, extra = te_model.encode_token_weights_batch([twp0, twp1])
+        self.assertEqual(tuple(batched.shape), (2, 60, 16))
+        self.assertIn("attention_mask", extra)
+        self.assertEqual(int(extra["attention_mask"][0].sum()), 40)
+        self.assertEqual(int(extra["attention_mask"][1].sum()), 60)
+        self.assertTrue(torch.equal(batched[0, :40], fake_out[0, 10:50]))
+        self.assertTrue(torch.equal(batched[1, :60], fake_out[1, 10:70]))
+
+    def test_qwen21_dit_tpu_batched_heterogeneous_equivalence(self):
+        import comfy.ops
+        import comfy.model_management as mm
+        from comfy.ldm.qwen_image21.model import QwenImage21Transformer2DModel
+
+        torch.manual_seed(42)
+        model = QwenImage21Transformer2DModel(
+            in_channels=16, out_channels=16, num_layers=2,
+            attention_head_dim=32, num_attention_heads=4,
+            context_in_dim=64, mlp_ratio=2, axes_dims_rope=(8, 12, 12),
+            dtype=torch.float32, device="cpu", operations=comfy.ops.disable_weight_init,
+        )
+        for p in model.parameters():
+            torch.nn.init.normal_(p, std=0.02)
+
+        x0, x1 = torch.randn(1, 16, 4, 4), torch.randn(1, 16, 4, 4)
+        t1, t2 = torch.tensor([0.8]), torch.tensor([0.4])
+        ctx0, ctx1 = torch.randn(1, 23, 64), torch.randn(1, 59, 64)
+        ctx_b = torch.zeros(2, 59, 64)
+        ctx_b[0, :23], ctx_b[1, :59] = ctx0[0], ctx1[0]
+        mask_b = torch.zeros(2, 59, dtype=torch.long)
+        mask_b[0, :23], mask_b[1, :59] = 1, 1
+
+        fake_patcher = MagicMock()
+        fake_patcher.is_dynamic.return_value = False
+        fake_patcher.get_free_memory.return_value = 10**10
+        model.current_patcher = fake_patcher
+
+        with torch.no_grad():
+            model.reset_prefix_cache(True)
+            r0_1, r0_2 = model(x0, t1, ctx0), model(x0, t2, ctx0)
+            model.reset_prefix_cache(True)
+            r1_1, r1_2 = model(x1, t1, ctx1), model(x1, t2, ctx1)
+            model.reset_prefix_cache(True)
+            with patch.object(mm, "is_device_tpu", return_value=True):
+                b_1 = model(torch.cat([x0, x1]), torch.cat([t1, t1]), ctx_b, attention_mask=mask_b)
+                b_2 = model(torch.cat([x0, x1]), torch.cat([t2, t2]), ctx_b, attention_mask=mask_b)
+
+        for ref, got in [(r0_1, b_1[:1]), (r1_1, b_1[1:]), (r0_2, b_2[:1]), (r1_2, b_2[1:])]:
+            self.assertFalse(torch.isnan(got).any())
+            cos = torch.nn.functional.cosine_similarity(ref.flatten(), got.flatten(), dim=0).item()
+            self.assertGreater(cos, 0.999999)
+
 if __name__ == "__main__":
     unittest.main()

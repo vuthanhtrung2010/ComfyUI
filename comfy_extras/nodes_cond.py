@@ -134,11 +134,42 @@ class SaveConditioning(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
+class CLIPTextEncodeBatch(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        template = io.Autogrow.TemplatePrefix(
+            input=io.String.Input("text", multiline=True, dynamic_prompts=True),
+            prefix="text",
+            min=1,
+            max=32,
+        )
+        return io.Schema(
+            node_id="CLIPTextEncodeBatch",
+            display_name="CLIP Text Encode (Batch)",
+            category="conditioning",
+            description="Encodes multiple prompts in a single batched text-encoder forward pass, outputting a batched conditioning aligned along dim 0.",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.Autogrow.Input("texts", template=template),
+            ],
+            outputs=[io.Conditioning.Output()],
+        )
+
+    @classmethod
+    def execute(cls, clip, texts: io.Autogrow.Type) -> io.NodeOutput:
+        if clip is None:
+            raise RuntimeError("ERROR: clip input is invalid: None")
+        prompts = list(texts.values())
+        tokens_list = [clip.tokenize(p) for p in prompts]
+        return io.NodeOutput(clip.encode_from_tokens_batch(tokens_list))
+
+
 class CondExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             CLIPTextEncodeControlnet,
+            CLIPTextEncodeBatch,
             T5TokenizerOptions,
             ConditioningLoader,
             SaveConditioning,

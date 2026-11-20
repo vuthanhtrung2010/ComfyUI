@@ -225,13 +225,16 @@ def prefix_cached_attention(prefix_k, prefix_v, transformer_options={}, mask=Non
     return attn
 
 
-def prefix_cache_key(x, context, refs, slots):
+def prefix_cache_key(x, context, refs, slots, attention_mask=None):
     # one fp32 tensor per batch row: lengths and slots, then the prompt embedding and reference latents
     # the target shape is part of it because reference rope ids are centred on the target
     # Batch size also matters: prefix GEMMs can round differently when CFG batching changes.
     header = [context.shape[0], context.shape[1], len(refs)] + list(x.shape[-2:]) + list(slots) + [s for r in refs for s in r.shape[-2:]]
     header = torch.tensor(header, dtype=torch.float32, device=context.device).expand(context.shape[0], -1)
-    return torch.cat([header, context.float().flatten(1)] + [r.float().flatten(1) for r in refs], dim=1)
+    parts = [header, context.float().flatten(1)] + [r.float().flatten(1) for r in refs]
+    if attention_mask is not None:
+        parts.append(attention_mask.to(device=context.device, dtype=torch.float32).flatten(1))
+    return torch.cat(parts, dim=1)
 
 
 class PrefixCacheSlot(nn.ModuleList):
@@ -386,7 +389,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         cache.select(key)
         return cache, False
 
-    def build_sequence(self, x, context, ref_latents, image_slots, real_txt_len=None, target_mask=None):
+    def build_sequence(self, x, context, ref_latents, image_slots, real_txt_len=None, real_txt_lens=None, target_mask=None):
         # text with each reference image spliced in at its slot, target image last
         txt = self.txt_in(context)
         slots = (image_slots + [txt.shape[1]] * len(ref_latents))[:len(ref_latents)]
@@ -395,27 +398,42 @@ class QwenImage21Transformer2DModel(nn.Module):
         parts, ids, segments = [], [], []
         pos, length = 0, 0
         imgs = ref_latents + [x]
+        batch_ids = real_txt_lens is not None
+        B = x.shape[0]
         for idx, ((start, end), img) in enumerate(zip(zip(bounds[:-1], bounds[1:]), imgs)):
             n = end - start
             if n > 0:
                 parts.append(txt[:, start:end])
-                ids.append(torch.arange(pos, pos + n, device=x.device, dtype=torch.float32).unsqueeze(1).expand(n, 3))
+                txt_ids = torch.arange(pos, pos + n, device=x.device, dtype=torch.float32).unsqueeze(1).expand(n, 3)
+                ids.append(txt_ids.unsqueeze(0).expand(B, n, 3) if batch_ids else txt_ids)
                 segments.append((length, length + n, torch.ones((n, length + n), dtype=torch.bool, device=x.device).tril(length)))
-                pos += real_txt_len if real_txt_len is not None and idx == len(imgs) - 1 else n
+                if real_txt_lens is not None and idx == len(imgs) - 1:
+                    pos = real_txt_lens.to(device=x.device, dtype=torch.float32)
+                else:
+                    pos += real_txt_len if real_txt_len is not None and idx == len(imgs) - 1 else n
                 length += n
             h, w = img.shape[-2:]
             parts.append(self.img_in(img.flatten(2).transpose(1, 2)))
             # half a token where a reference grid has the other parity, so it centres on the target
             hh = torch.arange(h, device=x.device, dtype=torch.float32) - (h - h // 2) + 0.5 * (h % 2 - x.shape[-2] % 2)
             ww = torch.arange(w, device=x.device, dtype=torch.float32) - (w - w // 2) + 0.5 * (w % 2 - x.shape[-1] % 2)
-            ids.append(torch.stack([torch.full((h, w), pos, device=x.device, dtype=torch.float32), hh[:, None].expand(h, w), ww[None, :].expand(h, w)], dim=-1).flatten(0, 1))
+            if isinstance(pos, torch.Tensor):
+                pos_grid = pos[:, None, None].expand(B, h * w, 1)
+                hw_grid = torch.stack([hh[:, None].expand(h, w), ww[None, :].expand(h, w)], dim=-1).flatten(0, 1).unsqueeze(0).expand(B, h * w, 2)
+                ids.append(torch.cat([pos_grid, hw_grid], dim=-1))
+            else:
+                img_ids = torch.stack([torch.full((h, w), pos, device=x.device, dtype=torch.float32), hh[:, None].expand(h, w), ww[None, :].expand(h, w)], dim=-1).flatten(0, 1)
+                ids.append(img_ids.unsqueeze(0).expand(B, h * w, 3) if batch_ids else img_ids)
             seg_mask = target_mask if idx == len(imgs) - 1 else None
             segments.append((length, length + h * w, seg_mask))
-            pos += max(h, w)
+            pos = pos + max(h, w)
             length += h * w
 
-        # (1, N, 1, ...): the layout the fused rms_rope wants for (B, N, H, D) queries
-        pe = self.pe_embedder(torch.cat(ids, dim=0).unsqueeze(0)).transpose(1, 2).contiguous()
+        # (1 or B, N, 1, ...): the layout the fused rms_rope wants for (B, N, H, D) queries
+        ids_cat = torch.cat(ids, dim=-2)
+        if ids_cat.ndim == 2:
+            ids_cat = ids_cat.unsqueeze(0)
+        pe = self.pe_embedder(ids_cat).transpose(1, 2).contiguous()
         return torch.cat(parts, dim=1), pe, segments
 
     def forward(self, x, timestep, context, ref_latents=None, image_slots=None, transformer_options={}, **kwargs):
@@ -425,26 +443,42 @@ class QwenImage21Transformer2DModel(nn.Module):
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
         ).execute(x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs)
 
-    def _forward(self, x, timesteps, context, ref_latents=None, image_slots=None, transformer_options={}, prefix_cache=None, **kwargs):
+    def _forward(self, x, timesteps, context, ref_latents=None, image_slots=None, transformer_options={}, prefix_cache=None, attention_mask=None, **kwargs):
         B, C, H, W = x.shape
         dtype = x.dtype
         ref_latents = list(ref_latents or [])
         image_slots = list(image_slots or [])
 
         raw_context = context
+        raw_attention_mask = attention_mask
         real_txt_len = None
+        real_txt_lens = None
         prefix_mask = None
-        if comfy.model_management.is_device_tpu(x.device) and prefix_cache is None and len(ref_latents) == 0 and context.shape[1] > 0:
-            real_txt_len = context.shape[1]
-            bucket_len = ((real_txt_len + 127) // 128) * 128
-            if bucket_len > real_txt_len:
-                context = F.pad(context, (0, 0, 0, bucket_len - real_txt_len))
-            # torch_tpu SDPA produces NaN when attn_mask broadcasts over Q (dim -2 == 1); expand explicitly to (1, 1, Q, K).
-            prefix_mask = torch.ones((1, 1, H * W, bucket_len + H * W), dtype=torch.bool, device=x.device)
-            if bucket_len > real_txt_len:
-                prefix_mask[..., real_txt_len:bucket_len] = False
+        is_tpu = comfy.model_management.is_device_tpu(x.device)
+        if prefix_cache is None and len(ref_latents) == 0 and context.shape[1] > 0:
+            if attention_mask is not None:
+                txt_len = context.shape[1]
+                bucket_len = ((txt_len + 127) // 128) * 128 if is_tpu else txt_len
+                if attention_mask.shape[0] != B:
+                    attention_mask = attention_mask[:1].expand(B, -1)
+                if bucket_len > txt_len:
+                    context = F.pad(context, (0, 0, 0, bucket_len - txt_len))
+                    attention_mask = F.pad(attention_mask, (0, bucket_len - txt_len))
+                txt_valid = attention_mask.to(device=x.device, dtype=torch.bool)
+                real_txt_lens = txt_valid.sum(dim=1)
+                key_valid = torch.cat([txt_valid, torch.ones((B, H * W), dtype=torch.bool, device=x.device)], dim=1)
+                prefix_mask = key_valid[:, None, None, :].expand(B, 1, H * W, bucket_len + H * W).contiguous()
+            elif is_tpu:
+                real_txt_len = context.shape[1]
+                bucket_len = ((real_txt_len + 127) // 128) * 128
+                if bucket_len > real_txt_len:
+                    context = F.pad(context, (0, 0, 0, bucket_len - real_txt_len))
+                # torch_tpu SDPA produces NaN when attn_mask broadcasts over Q (dim -2 == 1); expand explicitly to (B, 1, Q, K).
+                prefix_mask = torch.ones((B, 1, H * W, bucket_len + H * W), dtype=torch.bool, device=x.device)
+                if bucket_len > real_txt_len:
+                    prefix_mask[..., real_txt_len:bucket_len] = False
 
-        hidden_states, pe, segments = self.build_sequence(x, context, ref_latents, image_slots, real_txt_len=real_txt_len, target_mask=prefix_mask)
+        hidden_states, pe, segments = self.build_sequence(x, context, ref_latents, image_slots, real_txt_len=real_txt_len, real_txt_lens=real_txt_lens, target_mask=prefix_mask)
         prefix_len = hidden_states.shape[1] - H * W
         patches = transformer_options.get("patches", {})
         for p in patches.get("post_input", []):
@@ -460,7 +494,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
         cache, cached = None, False
         if prefix_len > 0 and self.can_cache_prefix(transformer_options):
-            key = prefix_cache_key(x, raw_context, ref_latents, image_slots)
+            key = prefix_cache_key(x, raw_context, ref_latents, image_slots, attention_mask=raw_attention_mask)
             options = transformer_options.get("qwen_image21_cache", {})
             if prefix_cache is not None and x.device in prefix_cache:
                 cache = PrefixCache(prefix_cache[x.device])

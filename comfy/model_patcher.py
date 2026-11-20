@@ -1085,6 +1085,7 @@ class ModelPatcher:
                 comfy.model_management.is_device_tpu(device_to)
                 and self.offload_device == torch.device("cpu")
                 and not self.weight_inplace_update
+                and comfy.model_management.vram_state != comfy.model_management.VRAMState.HIGH_VRAM
             )
             load_completely.sort(reverse=True)
             for x in load_completely:

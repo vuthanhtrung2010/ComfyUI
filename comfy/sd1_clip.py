@@ -262,6 +262,18 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
             attention_masks.append(attention_mask)
             num_tokens.append(sum(attention_mask))
 
+        if len(embeds_out) > 1:
+            max_len = max(e.shape[1] for e in embeds_out)
+            if any(e.shape[1] < max_len for e in embeds_out):
+                embeds_out = [
+                    torch.nn.functional.pad(e, (0, 0, 0, max_len - e.shape[1])) if e.shape[1] < max_len else e
+                    for e in embeds_out
+                ]
+                attention_masks = [
+                    m + [0] * (max_len - len(m)) if len(m) < max_len else m
+                    for m in attention_masks
+                ]
+
         return torch.cat(embeds_out), torch.tensor(attention_masks, device=device, dtype=torch.long), num_tokens, embeds_info
 
     def forward(self, tokens):
