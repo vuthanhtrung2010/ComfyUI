@@ -291,5 +291,31 @@ class TestTPUModelManagement(unittest.TestCase):
             cos = torch.nn.functional.cosine_similarity(ref.flatten(), got.flatten(), dim=0).item()
             self.assertGreater(cos, 0.999999)
 
+    def test_tpu_compiled_w8a16_per_shape_cache(self):
+        import comfy.quant_ops as qo
+
+        seen_names = []
+
+        def fake_compile(fn, backend=None):
+            self.assertEqual(backend, "tpu")
+            seen_names.append(fn.__code__.co_name)
+            return fn
+
+        with patch.object(qo, "_tpu_backend_available", return_value=True), \
+             patch.object(qo, "_TPU_COMPILED_W8A16_CACHE", {}), \
+             patch.object(qo, "_TPU_COMPILED_MAX_SHAPES", 3), \
+             patch.object(torch, "compile", side_effect=fake_compile):
+            f1 = qo._get_tpu_compiled_w8a16_fn(True, (1, 128, 3072), (3072, 3072), 64)
+            f1_again = qo._get_tpu_compiled_w8a16_fn(True, (1, 128, 3072), (3072, 3072), 64)
+            f2 = qo._get_tpu_compiled_w8a16_fn(True, (2, 128, 3072), (3072, 3072), 64)
+            f3 = qo._get_tpu_compiled_w8a16_fn(False, (4, 128, 3072), (3072, 3072), 0)
+            f4 = qo._get_tpu_compiled_w8a16_fn(True, (6, 128, 3072), (3072, 3072), 64)
+
+        self.assertIs(f1, f1_again)
+        self.assertIsNot(f1, f2)
+        self.assertIsNot(f2, f3)
+        self.assertIsNone(f4)
+        self.assertEqual(len(set(seen_names)), 3)
+
 if __name__ == "__main__":
     unittest.main()

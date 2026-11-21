@@ -1,3 +1,4 @@
+import types
 import torch
 import logging
 
@@ -278,23 +279,33 @@ def _int8_w8a16_bf16(x, qdata, scale):
     return torch.nn.functional.linear(x, qdata.to(dtype=x.dtype)) * scale.to(dtype=x.dtype).reshape(-1)
 
 
-_TPU_COMPILED_W8A16_CONVROT = None
-_TPU_COMPILED_W8A16 = None
-_TPU_COMPILE_INIT = False
+_TPU_COMPILED_W8A16_CACHE = {}
+_TPU_BACKEND_AVAILABLE = None
+_TPU_COMPILED_MAX_SHAPES = 128
 
 
-def _get_tpu_compiled_w8a16():
-    global _TPU_COMPILED_W8A16_CONVROT, _TPU_COMPILED_W8A16, _TPU_COMPILE_INIT
-    if not _TPU_COMPILE_INIT:
-        _TPU_COMPILE_INIT = True
-        if hasattr(torch, "_dynamo") and "tpu" in torch._dynamo.list_backends():
-            if hasattr(torch._dynamo.config, "recompile_limit"):
-                torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
-            if hasattr(torch._dynamo.config, "cache_size_limit"):
-                torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
-            _TPU_COMPILED_W8A16_CONVROT = torch.compile(_int8_w8a16_convrot_bf16, backend="tpu")
-            _TPU_COMPILED_W8A16 = torch.compile(_int8_w8a16_bf16, backend="tpu")
-    return _TPU_COMPILED_W8A16_CONVROT, _TPU_COMPILED_W8A16
+def _tpu_backend_available():
+    global _TPU_BACKEND_AVAILABLE
+    if _TPU_BACKEND_AVAILABLE is None:
+        _TPU_BACKEND_AVAILABLE = hasattr(torch, "_dynamo") and "tpu" in torch._dynamo.list_backends()
+    return _TPU_BACKEND_AVAILABLE
+
+
+def _get_tpu_compiled_w8a16_fn(convrot, x_shape, qdata_shape, gs):
+    if not _tpu_backend_available():
+        return None
+    key = (convrot, tuple(x_shape), tuple(qdata_shape), gs)
+    fn = _TPU_COMPILED_W8A16_CACHE.get(key)
+    if fn is not None:
+        return fn
+    if len(_TPU_COMPILED_W8A16_CACHE) >= _TPU_COMPILED_MAX_SHAPES:
+        return None
+    base = _int8_w8a16_convrot_bf16 if convrot else _int8_w8a16_bf16
+    tag = f"{base.__name__}_{len(_TPU_COMPILED_W8A16_CACHE)}"
+    unique_fn = types.FunctionType(base.__code__.replace(co_name=tag), base.__globals__)
+    compiled = torch.compile(unique_fn, backend="tpu")
+    _TPU_COMPILED_W8A16_CACHE[key] = compiled
+    return compiled
 
 
 def int8_tensorwise_linear(x, weight, bias=None):
@@ -304,17 +315,17 @@ def int8_tensorwise_linear(x, weight, bias=None):
     convrot = getattr(params, "convrot", False)
     if x.dtype == torch.bfloat16:
         scale = params.scale if params.scale.device == x.device else params.scale.to(device=x.device)
-        compiled_convrot, compiled_plain = _get_tpu_compiled_w8a16() if x.device.type == "tpu" else (None, None)
+        gs = params.convrot_groupsize if convrot else 0
+        compiled = _get_tpu_compiled_w8a16_fn(convrot, x.shape, qdata.shape, gs) if x.device.type == "tpu" else None
         if convrot:
-            gs = params.convrot_groupsize
             h = _build_hadamard(gs, device=x.device, dtype=x.dtype)
-            if compiled_convrot is not None:
-                out = compiled_convrot(x, qdata, scale, h, gs)
+            if compiled is not None:
+                out = compiled(x, qdata, scale, h, gs)
             else:
                 out = _int8_w8a16_convrot_bf16(x, qdata, scale, h, gs)
         else:
-            if compiled_plain is not None:
-                out = compiled_plain(x, qdata, scale)
+            if compiled is not None:
+                out = compiled(x, qdata, scale)
             else:
                 out = _int8_w8a16_bf16(x, qdata, scale)
     else:

@@ -256,14 +256,16 @@ def main():
         results["server_hbm_gb"] = round(server_hbm / (1024 ** 3), 2)
         print(f"Server /system_stats verified TPU HBM: {results['server_hbm_gb']:.2f} GB", flush=True)
 
-        # Sweep B=1 (cold + warm), B=2 (cold + warm), B=4 (cold + warm)
+        # Sweep B=1 (cold + warm same-bucket), B=2 (cold + warm), B=4 (cold + warm), B=6 (cold + warm)
         sweep = [
             ("B1_cold", PROMPTS[:1], "v6e1_b1_cold", 0),
-            ("B1_warm", PROMPTS[1:2], "v6e1_b1_warm", 0),
+            ("B1_warm", PROMPTS[3:4], "v6e1_b1_warm", 0),
             ("B2_cold", PROMPTS[:2], "v6e1_b2_cold", 10),
             ("B2_warm", PROMPTS[2:4], "v6e1_b2_warm", 10),
             ("B4_cold", PROMPTS[:4], "v6e1_b4_cold", 20),
-            ("B4_warm", PROMPTS[:4], "v6e1_b4_warm", 30),
+            ("B4_warm", PROMPTS[1:] + PROMPTS[:1], "v6e1_b4_warm", 30),
+            ("B6_cold", PROMPTS + PROMPTS[:2], "v6e1_b6_cold", 40),
+            ("B6_warm", PROMPTS[2:] + PROMPTS[:4], "v6e1_b6_warm", 50),
         ]
         for label, batch_p, prefix, soff in sweep:
             wf = build_batched_wf(batch_p, prefix=prefix, steps=25, width=1024, height=640, seed_offset=soff)
@@ -309,16 +311,17 @@ def run(session_name=SESSION, use_existing=False):
         else:
             print(f"=== Provisioning Colab TPU v6e-1 Session '{session_name}' ===", flush=True)
             provisioned = False
-            for attempt in range(1, 3):
-                print(f"Attempt {attempt}/2...", flush=True)
+            max_retries = 100
+            for attempt in range(1, max_retries + 1):
+                print(f"Attempt {attempt}/{max_retries}...", flush=True)
                 res = subprocess.run([COLAB_CLI, "--auth=oauth2", "new", "-s", session_name, "--tpu", "v6e1"], capture_output=True, text=True)
                 print(res.stdout, res.stderr, flush=True)
                 if res.returncode == 0:
                     provisioned = True
                     break
                 subprocess.run([COLAB_CLI, "--auth=oauth2", "stop", "-s", session_name], capture_output=True, text=True)
-                if attempt < 2:
-                    time.sleep(10)
+                if attempt < max_retries:
+                    time.sleep(5)
             if not provisioned:
                 raise RuntimeError("Failed to provision Colab v6e1 session after retries")
 
